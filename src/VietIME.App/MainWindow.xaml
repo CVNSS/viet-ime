@@ -1,0 +1,80 @@
+<Window x:Class="VietIME.App.MainWindow"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
+        xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
+        xmlns:local="clr-namespace:VietIME.App"
+        mc:Ignorable="d"
+        Title="VietIME - Cài đặt (Debug Mode)" 
+        Height="600" Width="600"
+        WindowStartupLocation="CenterScreen"
+        ResizeMode="CanResize">
+    <Grid Margin="20">
+        <Grid.RowDefinitions>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="*"/>
+            <RowDefinition Height="Auto"/>
+        </Grid.RowDefinitions>
+        
+        <!-- Tiêu đề -->
+        <StackPanel Grid.Row="0" Margin="0,0,0,20">
+            <TextBlock Text="VietIME" FontSize="28" FontWeight="Bold" Foreground="#2196F3"/>
+            <TextBlock Text="Bộ gõ tiếng Việt cho Windows" Foreground="Gray"/>
+        </StackPanel>
+        
+        <!-- Trạng thái -->
+        <GroupBox Grid.Row="1" Header="Trạng thái" Margin="0,0,0,15">
+            <StackPanel Margin="10">
+                <CheckBox x:Name="chkEnabled" Content="Bật VietIME" 
+                          IsChecked="True" Checked="ChkEnabled_Changed" Unchecked="ChkEnabled_Changed"/>
+                <TextBlock x:Name="txtStatus" Text="Đang bật - Telex" Margin="0,5,0,0" Foreground="Green"/>
+            </StackPanel>
+        </GroupBox>
+        
+        <!-- Kiểu gõ -->
+        <GroupBox Grid.Row="2" Header="Kiểu gõ" Margin="0,0,0,15">
+            <StackPanel Margin="10">
+                <RadioButton x:Name="rbTelex" Content="Telex (aa=â, dd=đ, s=sắc)" 
+                             IsChecked="True" Checked="InputMethod_Changed" GroupName="InputMethod"/>
+                <RadioButton x:Name="rbVNI" Content="VNI (6=â, 9=đ, 1=sắc)" 
+                             Margin="0,5,0,0" Checked="InputMethod_Changed" GroupName="InputMethod"/>
+            </StackPanel>
+        </GroupBox>
+        
+        <!-- Phím tắt -->
+        <GroupBox Grid.Row="3" Header="Phím tắt" Margin="0,0,0,15">
+            <StackPanel Margin="10">
+                <TextBlock Text="Ctrl + Shift: Bật/tắt VietIME"/>
+                <TextBlock Text="Double-click tray icon: Bật/tắt VietIME" Margin="0,5,0,0"/>
+            </StackPanel>
+        </GroupBox>
+        
+        <!-- Test area -->
+        <GroupBox Grid.Row="4" Header="Thử nghiệm và Debug" Margin="0,0,0,15">
+            <Grid>
+                <Grid.RowDefinitions>
+                    <RowDefinition Height="60"/>
+                    <RowDefinition Height="*"/>
+                </Grid.RowDefinitions>
+                <TextBox x:Name="txtTest" AcceptsReturn="True" TextWrapping="Wrap" 
+                         Grid.Row="0" Margin="10,10,10,5" 
+                         Text="Gõ thử tiếng Việt ở đây..."/>
+                <TextBox x:Name="txtDebug" Grid.Row="1" Margin="10,5,10,10" 
+                         IsReadOnly="True" TextWrapping="Wrap" 
+                         VerticalScrollBarVisibility="Auto"
+                         Background="#1e1e1e" Foreground="#00ff00" 
+                         FontFamily="Consolas" FontSize="10"/>
+            </Grid>
+        </GroupBox>
+        
+        <!-- Nút -->
+        <StackPanel Grid.Row="5" Orientation="Horizontal" HorizontalAlignment="Right">
+            <Button Content="Ẩn xuống khay" Padding="15,8" Margin="0,0,10,0" Click="BtnMinimize_Click"/>
+            <Button Content="Thoát" Padding="15,8" Click="BtnExit_Click" 
+                    Background="#f44336" Foreground="White"/>
+        </StackPanel>
+    </Grid>
+</Window>

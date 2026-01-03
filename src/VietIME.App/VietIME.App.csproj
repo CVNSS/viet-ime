@@ -1,0 +1,36 @@
+﻿<Project Sdk="Microsoft.NET.Sdk">
+
+  <ItemGroup>
+    <ProjectReference Include="..\VietIME.Core\VietIME.Core.csproj" />
+    <ProjectReference Include="..\VietIME.Hook\VietIME.Hook.csproj" />
+  </ItemGroup>
+
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net8.0-windows</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <UseWPF>true</UseWPF>
+    <UseWindowsForms>true</UseWindowsForms>
+    <AssemblyName>VietIME</AssemblyName>
+    <Version>1.0.0</Version>
+    <Company>VietIME</Company>
+    <Product>VietIME - Bộ gõ tiếng Việt</Product>
+    <Description>Bộ gõ tiếng Việt cho Windows - Thay thế Unikey</Description>
+    
+    <!-- Icon -->
+    <ApplicationIcon>Assets\icon.ico</ApplicationIcon>
+    
+    <!-- Portable exe settings -->
+    <PublishSingleFile>true</PublishSingleFile>
+    <SelfContained>true</SelfContained>
+    <RuntimeIdentifier>win-x64</RuntimeIdentifier>
+    <IncludeNativeLibrariesForSelfExtract>true</IncludeNativeLibrariesForSelfExtract>
+    <EnableCompressionInSingleFile>true</EnableCompressionInSingleFile>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <Content Include="Assets\icon.ico" />
+  </ItemGroup>
+
+</Project>
