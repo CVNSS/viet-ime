@@ -32,6 +32,10 @@ public class KeyboardHook : IDisposable
     private const int BUFFER_TIMEOUT_MS = 2000; // 2 giây
     private DateTime _lastKeyTime = DateTime.MinValue;
     
+    // Debounce cho hotkey toggle - tránh toggle nhiều lần
+    private DateTime _lastToggleTime = DateTime.MinValue;
+    private const int TOGGLE_DEBOUNCE_MS = 300;
+    
     public KeyboardHook()
     {
         // Khởi tạo delegate trong constructor để giữ reference
@@ -241,18 +245,40 @@ public class KeyboardHook : IDisposable
     }
     
     /// <summary>
-    /// Xử lý hotkey toggle IME (Ctrl + Shift)
+    /// Xử lý hotkey toggle IME (Ctrl + Shift hoặc Ctrl + `)
     /// </summary>
     private bool HandleToggleHotkey(uint vkCode)
     {
-        // Toggle bằng Ctrl + Shift (khi nhấn Shift trong khi giữ Ctrl)
+        // Phương pháp 1: Ctrl + ` (backtick/grave) - ưu tiên
+        if (vkCode == 0xC0 && NativeMethods.IsCtrlPressed() && !NativeMethods.IsShiftPressed())
+        {
+            return TryToggle();
+        }
+        
+        // Phương pháp 2: Ctrl + Shift (khi thả Ctrl trong khi giữ Shift)
+        // Chỉ trigger khi nhấn Shift và Ctrl đang giữ
         if (vkCode == NativeMethods.VK_SHIFT && NativeMethods.IsCtrlPressed())
         {
-            IsEnabled = !IsEnabled;
-            return true;
+            return TryToggle();
         }
         
         return false;
+    }
+    
+    /// <summary>
+    /// Toggle với debounce để tránh toggle nhiều lần
+    /// </summary>
+    private bool TryToggle()
+    {
+        var now = DateTime.UtcNow;
+        if ((now - _lastToggleTime).TotalMilliseconds < TOGGLE_DEBOUNCE_MS)
+        {
+            return true; // Vẫn chặn phím nhưng không toggle
+        }
+        
+        _lastToggleTime = now;
+        IsEnabled = !IsEnabled;
+        return true;
     }
     
     /// <summary>
