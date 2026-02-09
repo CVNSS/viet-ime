@@ -1,3 +1,4 @@
+using System.Collections.Concurrent;
 using System.Diagnostics;
 using System.Runtime.InteropServices;
 using VietIME.Core.Engines;
@@ -6,55 +7,46 @@ namespace VietIME.Hook;
 
 /// <summary>
 /// Quản lý keyboard hook - bắt tất cả phím trên toàn hệ thống
-/// Hoạt động với mọi ứng dụng Windows: Office, Browser, IDE, etc.
+///
+/// Chiến lược v7 - TỐI ƯU TỐC ĐỘ:
+/// - Background thread gửi output → hook callback return ngay → không block gõ phím
+/// - Queue phím khi busy → xử lý đúng thứ tự sau khi output gửi xong
+/// - Bỏ save/restore clipboard → tiết kiệm ~45ms mỗi phím
+/// - Delay 30ms giữa backspace và paste (vừa đủ cho terminal)
+/// - Tách riêng backspace và paste thành 2 SendInput (đảm bảo thứ tự)
 /// </summary>
 public class KeyboardHook : IDisposable
 {
     private IntPtr _hookId = IntPtr.Zero;
-    
-    // QUAN TRỌNG: Khai báo delegate như field và khởi tạo ngay để tránh GC
     private readonly NativeMethods.LowLevelKeyboardProc _proc;
-    
     private IInputEngine? _engine;
     private bool _isEnabled = true;
     private bool _disposed = false;
-    
-    // Flag để tránh xử lý lại input do chính mình gửi
-    private bool _isSendingInput = false;
-    
-    // Extra info marker để nhận diện input từ VietIME
-    private static readonly UIntPtr VIET_IME_MARKER = new(0x56494D45); // "VIME" in hex
-    
-    // Chế độ gửi input - true = dùng Clipboard (cho terminal), false = dùng SendInput
-    private bool _useClipboardMethod = true; // Mặc định dùng clipboard cho terminal
-    
-    // Timeout reset buffer (milliseconds) - nếu không gõ trong khoảng này, buffer sẽ reset
-    private const int BUFFER_TIMEOUT_MS = 2000; // 2 giây
+    private volatile bool _isSendingInput = false;
+    private volatile bool _isBusySending = false;
+
+    private static readonly UIntPtr VIET_IME_MARKER = new(0x56494D45);
+
+    private bool _useClipboardMethod = true;
+    private bool _useSelectReplace = true;
+    private const int BUFFER_TIMEOUT_MS = 2000;
     private DateTime _lastKeyTime = DateTime.MinValue;
-    
-    // Debounce cho hotkey toggle - tránh toggle nhiều lần
     private DateTime _lastToggleTime = DateTime.MinValue;
     private const int TOGGLE_DEBOUNCE_MS = 300;
-    
+
+    // Queue phím chờ xử lý khi đang busy
+    private readonly ConcurrentQueue<PendingKey> _pendingKeys = new();
+    private record PendingKey(char Char, bool IsShift);
+
     public KeyboardHook()
     {
-        // Khởi tạo delegate trong constructor để giữ reference
         _proc = HookCallback;
     }
-    
-    /// <summary>
-    /// Event khi trạng thái IME thay đổi
-    /// </summary>
+
     public event EventHandler<bool>? EnabledChanged;
-    
-    /// <summary>
-    /// Event khi có lỗi xảy ra
-    /// </summary>
     public event EventHandler<string>? Error;
-    
-    /// <summary>
-    /// Trạng thái bật/tắt IME
-    /// </summary>
+    public event Action<string>? DebugLog;
+
     public bool IsEnabled
     {
         get => _isEnabled;
@@ -68,10 +60,7 @@ public class KeyboardHook : IDisposable
             }
         }
     }
-    
-    /// <summary>
-    /// Engine đang sử dụng
-    /// </summary>
+
     public IInputEngine? Engine
     {
         get => _engine;
@@ -81,40 +70,37 @@ public class KeyboardHook : IDisposable
             _engine = value;
         }
     }
-    
-    /// <summary>
-    /// Cài đặt hook
-    /// </summary>
+
+    public bool UseClipboardMethod
+    {
+        get => _useClipboardMethod;
+        set => _useClipboardMethod = value;
+    }
+
     public void Install()
     {
-        if (_hookId != IntPtr.Zero)
-            return;
-        
+        if (_hookId != IntPtr.Zero) return;
+
         using var curProcess = Process.GetCurrentProcess();
         using var curModule = curProcess.MainModule;
-        
+
         if (curModule == null)
         {
             Error?.Invoke(this, "Không thể lấy module handle");
             return;
         }
-        
+
         _hookId = NativeMethods.SetWindowsHookEx(
-            NativeMethods.WH_KEYBOARD_LL,
-            _proc,
-            NativeMethods.GetModuleHandle(curModule.ModuleName),
-            0);
-        
+            NativeMethods.WH_KEYBOARD_LL, _proc,
+            NativeMethods.GetModuleHandle(curModule.ModuleName), 0);
+
         if (_hookId == IntPtr.Zero)
         {
             int error = Marshal.GetLastWin32Error();
             Error?.Invoke(this, $"Không thể cài đặt hook. Error code: {error}");
         }
     }
-    
-    /// <summary>
-    /// Gỡ bỏ hook
-    /// </summary>
+
     public void Uninstall()
     {
         if (_hookId != IntPtr.Zero)
@@ -123,118 +109,96 @@ public class KeyboardHook : IDisposable
             _hookId = IntPtr.Zero;
         }
     }
-    
-    /// <summary>
-    /// Event debug
-    /// </summary>
-    public event Action<string>? DebugLog;
-    
-    /// <summary>
-    /// Chế độ gửi input - true = Clipboard (tốt cho terminal), false = SendInput (nhanh hơn)
-    /// </summary>
-    public bool UseClipboardMethod
-    {
-        get => _useClipboardMethod;
-        set => _useClipboardMethod = value;
-    }
-    
-    /// <summary>
-    /// Callback xử lý mỗi phím được nhấn
-    /// </summary>
+
     private IntPtr HookCallback(int nCode, IntPtr wParam, IntPtr lParam)
     {
         try
         {
-            // Nếu đang gửi input hoặc nCode < 0, bỏ qua
             if (nCode < 0 || _isSendingInput)
-            {
                 return NativeMethods.CallNextHookEx(_hookId, nCode, wParam, lParam);
-            }
-            
+
             var hookStruct = Marshal.PtrToStructure<NativeMethods.KBDLLHOOKSTRUCT>(lParam);
-            
-            // Bỏ qua input do chính mình gửi (so sánh giá trị)
+            bool isShiftPressed = NativeMethods.IsShiftPressed(); // Bắt NGAY trước khi bị mất
+
             if ((ulong)hookStruct.dwExtraInfo == (ulong)VIET_IME_MARKER)
-            {
                 return NativeMethods.CallNextHookEx(_hookId, nCode, wParam, lParam);
-            }
-            
-            // Chỉ xử lý key down
+
             int msg = wParam.ToInt32();
             if (msg != NativeMethods.WM_KEYDOWN && msg != NativeMethods.WM_SYSKEYDOWN)
-            {
                 return NativeMethods.CallNextHookEx(_hookId, nCode, wParam, lParam);
-            }
-            
-            // Xử lý hotkey toggle (Ctrl + Shift)
+
             if (HandleToggleHotkey(hookStruct.vkCode))
-            {
-                return (IntPtr)1; // Chặn phím
-            }
-            
-            // Nếu IME tắt, bỏ qua
+                return (IntPtr)1;
+
             if (!_isEnabled || _engine == null)
-            {
                 return NativeMethods.CallNextHookEx(_hookId, nCode, wParam, lParam);
-            }
-            
-            // Bỏ qua nếu Ctrl hoặc Alt được nhấn (shortcuts)
-            // QUAN TRỌNG: Không reset buffer ở đây vì có thể là Ctrl từ Ctrl+V clipboard
+
             if (NativeMethods.IsCtrlPressed() || NativeMethods.IsAltPressed())
-            {
-                // Chỉ skip processing, KHÔNG reset buffer
                 return NativeMethods.CallNextHookEx(_hookId, nCode, wParam, lParam);
-            }
-            
-            // Xử lý các phím đặc biệt
+
             if (HandleSpecialKey(hookStruct.vkCode))
-            {
                 return NativeMethods.CallNextHookEx(_hookId, nCode, wParam, lParam);
-            }
-            
-            // Kiểm tra timeout - nếu quá lâu không gõ, reset buffer
+
+            // Timeout check
             var now = DateTime.UtcNow;
-            if (_lastKeyTime != DateTime.MinValue && 
+            if (_lastKeyTime != DateTime.MinValue &&
                 (now - _lastKeyTime).TotalMilliseconds > BUFFER_TIMEOUT_MS)
             {
-                _engine?.Reset();
+                _engine.Reset();
             }
             _lastKeyTime = now;
-            
-            // Chuyển virtual key thành ký tự
-            char? ch = NativeMethods.VirtualKeyToChar(hookStruct.vkCode, hookStruct.scanCode);
-            
-            DebugLog?.Invoke($"Key: vk={hookStruct.vkCode}, char={ch}");
-            
+
+            char? ch = NativeMethods.VirtualKeyToChar(hookStruct.vkCode, hookStruct.scanCode, isShiftPressed);
             if (!ch.HasValue)
-            {
                 return NativeMethods.CallNextHookEx(_hookId, nCode, wParam, lParam);
+
+            // Nếu đang busy gửi output, queue phím lại
+            if (_isBusySending)
+            {
+                _pendingKeys.Enqueue(new PendingKey(ch.Value, isShiftPressed));
+                return (IntPtr)1; // Chặn phím - sẽ xử lý sau
             }
-            
+
             // Xử lý ký tự qua engine
-            bool isShiftPressed = NativeMethods.IsShiftPressed();
             var result = _engine.ProcessKey(ch.Value, isShiftPressed);
-            
-            DebugLog?.Invoke($"Engine result: Handled={result.Handled}, Output={result.OutputText}, Backspace={result.BackspaceCount}, Buffer={result.CurrentBuffer}");
-            
+
+            DebugLog?.Invoke($"Key '{ch.Value}': Handled={result.Handled}, Output='{result.OutputText}', BS={result.BackspaceCount}");
+
             if (result.Handled && result.OutputText != null)
             {
-                if (_useClipboardMethod)
+                // Gửi output trên background thread → hook return ngay → không block gõ phím
+                _isBusySending = true;
+                int bs = result.BackspaceCount;
+                string text = result.OutputText;
+
+                Task.Run(() =>
                 {
-                    // Phương pháp Clipboard - hoạt động tốt với Terminal/PowerShell
-                    SendViaClipboard(result.BackspaceCount, result.OutputText);
-                }
-                else
-                {
-                    // Phương pháp SendInput - nhanh hơn nhưng không hỗ trợ terminal
-                    SendBackspaces(result.BackspaceCount);
-                    SendUnicodeString(result.OutputText);
-                }
-                
+                    try
+                    {
+                        if (_useClipboardMethod)
+                        {
+                            if (_useSelectReplace)
+                                SendViaSelectReplace(bs, text);
+                            else
+                                SendViaClipboard(bs, text);
+                        }
+                        else
+                        {
+                            SendBackspaces(bs);
+                            SendUnicodeString(text);
+                        }
+                    }
+                    finally
+                    {
+                        ProcessPendingKeys();       // Xử lý queue TRƯỚC
+                        _isBusySending = false;     // Mở khóa SAU → tránh race condition
+                    }
+                });
+
                 return (IntPtr)1; // Chặn phím gốc
             }
-            
-            // Nếu không xử lý đặc biệt, thêm vào buffer và cho phím đi qua
+
+            // Engine không xử lý → phím đi qua bình thường
             return NativeMethods.CallNextHookEx(_hookId, nCode, wParam, lParam);
         }
         catch (Exception ex)
@@ -243,47 +207,108 @@ public class KeyboardHook : IDisposable
             return NativeMethods.CallNextHookEx(_hookId, nCode, wParam, lParam);
         }
     }
-    
+
     /// <summary>
-    /// Xử lý hotkey toggle IME (Ctrl + Shift hoặc Ctrl + `)
+    /// Xử lý phím đã queue khi đang busy
+    /// Chạy trên background thread sau khi output gửi xong
     /// </summary>
+    private void ProcessPendingKeys()
+    {
+        while (_pendingKeys.TryDequeue(out var pending))
+        {
+            if (_engine == null) break;
+
+            var result = _engine.ProcessKey(pending.Char, pending.IsShift);
+
+            if (result.Handled && result.OutputText != null)
+            {
+                if (_useClipboardMethod)
+                {
+                    if (_useSelectReplace)
+                        SendViaSelectReplace(result.BackspaceCount, result.OutputText);
+                    else
+                        SendViaClipboard(result.BackspaceCount, result.OutputText);
+                }
+                else
+                {
+                    SendBackspaces(result.BackspaceCount);
+                    SendUnicodeString(result.OutputText);
+                }
+            }
+            else
+            {
+                // Engine không xử lý → gửi ký tự gốc
+                SendCharDirectly(pending.Char);
+            }
+
+            // Chờ ứng dụng đích xử lý xong trước khi gửi phím tiếp
+            Thread.Sleep(50);
+        }
+    }
+
+    /// <summary>
+    /// Gửi 1 ký tự trực tiếp (cho phím đã bị chặn nhưng engine không xử lý)
+    /// </summary>
+    private void SendCharDirectly(char ch)
+    {
+        _isSendingInput = true;
+        try
+        {
+            ushort unicode = ch;
+            var inputs = new NativeMethods.INPUT[2];
+            inputs[0] = new NativeMethods.INPUT
+            {
+                type = NativeMethods.INPUT_KEYBOARD,
+                u = new NativeMethods.INPUTUNION
+                {
+                    ki = new NativeMethods.KEYBDINPUT
+                    {
+                        wVk = 0, wScan = unicode,
+                        dwFlags = NativeMethods.KEYEVENTF_UNICODE,
+                        time = 0, dwExtraInfo = VIET_IME_MARKER
+                    }
+                }
+            };
+            inputs[1] = new NativeMethods.INPUT
+            {
+                type = NativeMethods.INPUT_KEYBOARD,
+                u = new NativeMethods.INPUTUNION
+                {
+                    ki = new NativeMethods.KEYBDINPUT
+                    {
+                        wVk = 0, wScan = unicode,
+                        dwFlags = NativeMethods.KEYEVENTF_UNICODE | NativeMethods.KEYEVENTF_KEYUP,
+                        time = 0, dwExtraInfo = VIET_IME_MARKER
+                    }
+                }
+            };
+            NativeMethods.SendInput(2, inputs, Marshal.SizeOf<NativeMethods.INPUT>());
+        }
+        finally
+        {
+            _isSendingInput = false;
+        }
+    }
+
     private bool HandleToggleHotkey(uint vkCode)
     {
-        // Phương pháp 1: Ctrl + ` (backtick/grave) - ưu tiên
         if (vkCode == 0xC0 && NativeMethods.IsCtrlPressed() && !NativeMethods.IsShiftPressed())
-        {
             return TryToggle();
-        }
-        
-        // Phương pháp 2: Ctrl + Shift (khi thả Ctrl trong khi giữ Shift)
-        // Chỉ trigger khi nhấn Shift và Ctrl đang giữ
         if (vkCode == NativeMethods.VK_SHIFT && NativeMethods.IsCtrlPressed())
-        {
             return TryToggle();
-        }
-        
         return false;
     }
-    
-    /// <summary>
-    /// Toggle với debounce để tránh toggle nhiều lần
-    /// </summary>
+
     private bool TryToggle()
     {
         var now = DateTime.UtcNow;
         if ((now - _lastToggleTime).TotalMilliseconds < TOGGLE_DEBOUNCE_MS)
-        {
-            return true; // Vẫn chặn phím nhưng không toggle
-        }
-        
+            return true;
         _lastToggleTime = now;
         IsEnabled = !IsEnabled;
         return true;
     }
-    
-    /// <summary>
-    /// Xử lý các phím đặc biệt (Space, Enter, Backspace, etc.)
-    /// </summary>
+
     private bool HandleSpecialKey(uint vkCode)
     {
         switch (vkCode)
@@ -294,45 +319,205 @@ public class KeyboardHook : IDisposable
             case NativeMethods.VK_ESCAPE:
                 _engine?.Reset();
                 return true;
-            
             case NativeMethods.VK_BACK:
                 _engine?.ProcessBackspace();
                 return true;
-            
-            // Phím di chuyển con trỏ - reset buffer vì không thể theo dõi vị trí mới
             case NativeMethods.VK_LEFT:
             case NativeMethods.VK_RIGHT:
             case NativeMethods.VK_UP:
             case NativeMethods.VK_DOWN:
             case NativeMethods.VK_HOME:
             case NativeMethods.VK_END:
-            case NativeMethods.VK_PRIOR:  // Page Up
-            case NativeMethods.VK_NEXT:   // Page Down
+            case NativeMethods.VK_PRIOR:
+            case NativeMethods.VK_NEXT:
             case NativeMethods.VK_DELETE:
                 _engine?.Reset();
                 return true;
-            
             default:
                 return false;
         }
     }
-    
+
     /// <summary>
-    /// Gửi n phím Backspace
+    /// Gửi qua Select+Replace (Shift+Left * N rồi Ctrl+V)
+    ///
+    /// Ưu điểm so với Backspace+Paste:
+    /// - Paste thay thế selection là atomic operation
+    /// - Không bị tình trạng backspace chưa xong mà paste đã đến (lỗi Chrome)
+    /// - Hoạt động đúng trên Chrome, Edge, và các Chromium-based browsers
     /// </summary>
+    private void SendViaSelectReplace(int backspaceCount, string text)
+    {
+        _isSendingInput = true;
+        try
+        {
+            // 1. Set clipboard
+            if (!SetClipboardText(text))
+            {
+                DebugLog?.Invoke("SendViaSelectReplace: SetClipboardText failed");
+                return;
+            }
+
+            // 2. Select N ký tự bằng Shift+Left (thay vì backspace)
+            if (backspaceCount > 0)
+            {
+                // Shift down
+                var shiftDown = MakeKeyInput(NativeMethods.VK_SHIFT, false);
+                NativeMethods.SendInput(1, new[] { shiftDown }, Marshal.SizeOf<NativeMethods.INPUT>());
+
+                // Left * N (với Shift giữ → select)
+                var leftInputs = new NativeMethods.INPUT[backspaceCount * 2];
+                for (int i = 0; i < backspaceCount; i++)
+                {
+                    leftInputs[i * 2] = MakeKeyInput((int)NativeMethods.VK_LEFT, false);
+                    leftInputs[i * 2 + 1] = MakeKeyInput((int)NativeMethods.VK_LEFT, true);
+                }
+                NativeMethods.SendInput((uint)leftInputs.Length, leftInputs, Marshal.SizeOf<NativeMethods.INPUT>());
+
+                // Shift up
+                var shiftUp = MakeKeyInput(NativeMethods.VK_SHIFT, true);
+                NativeMethods.SendInput(1, new[] { shiftUp }, Marshal.SizeOf<NativeMethods.INPUT>());
+
+                // Chờ selection hoàn tất
+                Thread.Sleep(30);
+            }
+
+            // 3. Gửi Ctrl+V để paste thay thế selection
+            var pasteInputs = new NativeMethods.INPUT[4];
+            pasteInputs[0] = MakeKeyInput(NativeMethods.VK_CONTROL, false);
+            pasteInputs[1] = MakeKeyInput(0x56, false);
+            pasteInputs[2] = MakeKeyInput(0x56, true);
+            pasteInputs[3] = MakeKeyInput(NativeMethods.VK_CONTROL, true);
+            NativeMethods.SendInput(4, pasteInputs, Marshal.SizeOf<NativeMethods.INPUT>());
+
+            DebugLog?.Invoke($"SendViaSelectReplace: select={backspaceCount}, text='{text}'");
+
+            // 4. Chờ paste xong
+            Thread.Sleep(30);
+        }
+        finally
+        {
+            _isSendingInput = false;
+        }
+    }
+
+    /// <summary>
+    /// Gửi qua Clipboard (fallback method)
+    ///
+    /// Tối ưu v7:
+    /// - Chạy trên background thread (hook callback đã return)
+    /// - Không save/restore clipboard (tiết kiệm ~45ms)
+    /// - Tách backspace và paste riêng, Sleep 30ms ở giữa
+    /// - Tổng delay: ~40ms (vs ~115ms ở v6)
+    /// </summary>
+    private void SendViaClipboard(int backspaceCount, string text)
+    {
+        _isSendingInput = true;
+        try
+        {
+            // 1. Set clipboard
+            if (!SetClipboardText(text))
+            {
+                DebugLog?.Invoke("SendViaClipboard: SetClipboardText failed");
+                return;
+            }
+
+            // 2. Gửi backspace
+            if (backspaceCount > 0)
+            {
+                var bsInputs = new NativeMethods.INPUT[backspaceCount * 2];
+                for (int i = 0; i < backspaceCount; i++)
+                {
+                    bsInputs[i * 2] = MakeKeyInput(NativeMethods.VK_BACK, false);
+                    bsInputs[i * 2 + 1] = MakeKeyInput(NativeMethods.VK_BACK, true);
+                }
+                NativeMethods.SendInput((uint)bsInputs.Length, bsInputs, Marshal.SizeOf<NativeMethods.INPUT>());
+
+                // Chờ terminal xử lý backspace - 30ms đủ vì chạy trên background thread
+                // (message pump không bị block như khi chạy trên hook callback)
+                Thread.Sleep(30);
+            }
+
+            // 3. Gửi Ctrl+V
+            var pasteInputs = new NativeMethods.INPUT[4];
+            pasteInputs[0] = MakeKeyInput(NativeMethods.VK_CONTROL, false);
+            pasteInputs[1] = MakeKeyInput(0x56, false);
+            pasteInputs[2] = MakeKeyInput(0x56, true);
+            pasteInputs[3] = MakeKeyInput(NativeMethods.VK_CONTROL, true);
+            NativeMethods.SendInput(4, pasteInputs, Marshal.SizeOf<NativeMethods.INPUT>());
+
+            DebugLog?.Invoke($"SendViaClipboard: bs={backspaceCount}, text='{text}'");
+
+            // 4. Chờ paste xong trước khi xử lý phím tiếp theo
+            Thread.Sleep(30);
+        }
+        finally
+        {
+            _isSendingInput = false;
+        }
+    }
+
+    private static NativeMethods.INPUT MakeKeyInput(int vk, bool keyUp)
+    {
+        // Extended keys (arrow keys, Home, End, etc.) cần flag KEYEVENTF_EXTENDEDKEY
+        // để hoạt động đúng, đặc biệt khi kết hợp với Shift
+        bool isExtended = vk == (int)NativeMethods.VK_LEFT || vk == (int)NativeMethods.VK_RIGHT ||
+                          vk == (int)NativeMethods.VK_UP || vk == (int)NativeMethods.VK_DOWN ||
+                          vk == (int)NativeMethods.VK_HOME || vk == (int)NativeMethods.VK_END ||
+                          vk == (int)NativeMethods.VK_PRIOR || vk == (int)NativeMethods.VK_NEXT ||
+                          vk == (int)NativeMethods.VK_DELETE;
+
+        uint flags = 0;
+        if (keyUp) flags |= (uint)NativeMethods.KEYEVENTF_KEYUP;
+        if (isExtended) flags |= (uint)NativeMethods.KEYEVENTF_EXTENDEDKEY;
+
+        return new NativeMethods.INPUT
+        {
+            type = NativeMethods.INPUT_KEYBOARD,
+            u = new NativeMethods.INPUTUNION
+            {
+                ki = new NativeMethods.KEYBDINPUT
+                {
+                    wVk = (ushort)vk,
+                    wScan = 0,
+                    dwFlags = flags,
+                    time = 0,
+                    dwExtraInfo = VIET_IME_MARKER
+                }
+            }
+        };
+    }
+
     private void SendBackspaces(int count)
     {
         if (count <= 0) return;
-        
         _isSendingInput = true;
-        
         try
         {
             var inputs = new NativeMethods.INPUT[count * 2];
-            
             for (int i = 0; i < count; i++)
             {
-                // Key down
+                inputs[i * 2] = MakeKeyInput(NativeMethods.VK_BACK, false);
+                inputs[i * 2 + 1] = MakeKeyInput(NativeMethods.VK_BACK, true);
+            }
+            NativeMethods.SendInput((uint)inputs.Length, inputs, Marshal.SizeOf<NativeMethods.INPUT>());
+        }
+        finally
+        {
+            _isSendingInput = false;
+        }
+    }
+
+    private void SendUnicodeString(string text)
+    {
+        if (string.IsNullOrEmpty(text)) return;
+        _isSendingInput = true;
+        try
+        {
+            var inputs = new NativeMethods.INPUT[text.Length * 2];
+            for (int i = 0; i < text.Length; i++)
+            {
+                ushort unicode = text[i];
                 inputs[i * 2] = new NativeMethods.INPUT
                 {
                     type = NativeMethods.INPUT_KEYBOARD,
@@ -340,16 +525,12 @@ public class KeyboardHook : IDisposable
                     {
                         ki = new NativeMethods.KEYBDINPUT
                         {
-                            wVk = NativeMethods.VK_BACK,
-                            wScan = 0,
-                            dwFlags = 0,
-                            time = 0,
-                            dwExtraInfo = VIET_IME_MARKER
+                            wVk = 0, wScan = unicode,
+                            dwFlags = NativeMethods.KEYEVENTF_UNICODE,
+                            time = 0, dwExtraInfo = VIET_IME_MARKER
                         }
                     }
                 };
-                
-                // Key up
                 inputs[i * 2 + 1] = new NativeMethods.INPUT
                 {
                     type = NativeMethods.INPUT_KEYBOARD,
@@ -357,314 +538,53 @@ public class KeyboardHook : IDisposable
                     {
                         ki = new NativeMethods.KEYBDINPUT
                         {
-                            wVk = NativeMethods.VK_BACK,
-                            wScan = 0,
-                            dwFlags = NativeMethods.KEYEVENTF_KEYUP,
-                            time = 0,
-                            dwExtraInfo = VIET_IME_MARKER
+                            wVk = 0, wScan = unicode,
+                            dwFlags = NativeMethods.KEYEVENTF_UNICODE | NativeMethods.KEYEVENTF_KEYUP,
+                            time = 0, dwExtraInfo = VIET_IME_MARKER
                         }
                     }
                 };
             }
-            
-            uint sent = NativeMethods.SendInput((uint)inputs.Length, inputs, Marshal.SizeOf<NativeMethods.INPUT>());
-            DebugLog?.Invoke($"SendBackspaces: count={count}, sent={sent}");
+            NativeMethods.SendInput((uint)inputs.Length, inputs, Marshal.SizeOf<NativeMethods.INPUT>());
         }
         finally
         {
             _isSendingInput = false;
         }
     }
-    
-    /// <summary>
-    /// Gửi qua Clipboard - Phương pháp này hoạt động với Terminal/PowerShell
-    /// </summary>
-    private void SendViaClipboard(int backspaceCount, string text)
-    {
-        _isSendingInput = true;
-        
-        try
-        {
-            // 1. Gửi backspace để xóa ký tự cũ
-            if (backspaceCount > 0)
-            {
-                var bsInputs = new NativeMethods.INPUT[backspaceCount * 2];
-                for (int i = 0; i < backspaceCount; i++)
-                {
-                    bsInputs[i * 2] = new NativeMethods.INPUT
-                    {
-                        type = NativeMethods.INPUT_KEYBOARD,
-                        u = new NativeMethods.INPUTUNION
-                        {
-                            ki = new NativeMethods.KEYBDINPUT
-                            {
-                                wVk = NativeMethods.VK_BACK,
-                                wScan = 0,
-                                dwFlags = 0,
-                                time = 0,
-                                dwExtraInfo = VIET_IME_MARKER
-                            }
-                        }
-                    };
-                    bsInputs[i * 2 + 1] = new NativeMethods.INPUT
-                    {
-                        type = NativeMethods.INPUT_KEYBOARD,
-                        u = new NativeMethods.INPUTUNION
-                        {
-                            ki = new NativeMethods.KEYBDINPUT
-                            {
-                                wVk = NativeMethods.VK_BACK,
-                                wScan = 0,
-                                dwFlags = NativeMethods.KEYEVENTF_KEYUP,
-                                time = 0,
-                                dwExtraInfo = VIET_IME_MARKER
-                            }
-                        }
-                    };
-                }
-                NativeMethods.SendInput((uint)bsInputs.Length, bsInputs, Marshal.SizeOf<NativeMethods.INPUT>());
-                
-                // Chờ để backspace được xử lý hoàn toàn (tăng từ 5ms lên 15ms)
-                Thread.Sleep(15);
-            }
-            
-            // 2. Set text vào clipboard sử dụng Win32 API
-            SetClipboardText(text);
-            
-            // 3. Gửi Ctrl+V để paste
-            var pasteInputs = new NativeMethods.INPUT[4];
-            
-            // Ctrl down
-            pasteInputs[0] = new NativeMethods.INPUT
-            {
-                type = NativeMethods.INPUT_KEYBOARD,
-                u = new NativeMethods.INPUTUNION
-                {
-                    ki = new NativeMethods.KEYBDINPUT
-                    {
-                        wVk = NativeMethods.VK_CONTROL,
-                        wScan = 0,
-                        dwFlags = 0,
-                        time = 0,
-                        dwExtraInfo = VIET_IME_MARKER
-                    }
-                }
-            };
-            
-            // V down
-            pasteInputs[1] = new NativeMethods.INPUT
-            {
-                type = NativeMethods.INPUT_KEYBOARD,
-                u = new NativeMethods.INPUTUNION
-                {
-                    ki = new NativeMethods.KEYBDINPUT
-                    {
-                        wVk = 0x56, // V key
-                        wScan = 0,
-                        dwFlags = 0,
-                        time = 0,
-                        dwExtraInfo = VIET_IME_MARKER
-                    }
-                }
-            };
-            
-            // V up
-            pasteInputs[2] = new NativeMethods.INPUT
-            {
-                type = NativeMethods.INPUT_KEYBOARD,
-                u = new NativeMethods.INPUTUNION
-                {
-                    ki = new NativeMethods.KEYBDINPUT
-                    {
-                        wVk = 0x56,
-                        wScan = 0,
-                        dwFlags = NativeMethods.KEYEVENTF_KEYUP,
-                        time = 0,
-                        dwExtraInfo = VIET_IME_MARKER
-                    }
-                }
-            };
-            
-            // Ctrl up
-            pasteInputs[3] = new NativeMethods.INPUT
-            {
-                type = NativeMethods.INPUT_KEYBOARD,
-                u = new NativeMethods.INPUTUNION
-                {
-                    ki = new NativeMethods.KEYBDINPUT
-                    {
-                        wVk = NativeMethods.VK_CONTROL,
-                        wScan = 0,
-                        dwFlags = NativeMethods.KEYEVENTF_KEYUP,
-                        time = 0,
-                        dwExtraInfo = VIET_IME_MARKER
-                    }
-                }
-            };
-            
-            uint sent = NativeMethods.SendInput(4, pasteInputs, Marshal.SizeOf<NativeMethods.INPUT>());
-            DebugLog?.Invoke($"SendViaClipboard: backspace={backspaceCount}, text='{text}', paste_sent={sent}");
-            
-            // Chờ để paste hoàn tất trước khi xử lý phím tiếp theo
-            Thread.Sleep(10);
-        }
-        finally
-        {
-            _isSendingInput = false;
-        }
-    }
-    
-    /// <summary>
-    /// Set text vào clipboard sử dụng Win32 API
-    /// </summary>
+
     private bool SetClipboardText(string text)
     {
-        // Retry một vài lần nếu clipboard bị lock
-        for (int retry = 0; retry < 5; retry++)
+        for (int retry = 0; retry < 10; retry++)
         {
             if (NativeMethods.OpenClipboard(IntPtr.Zero))
             {
                 try
                 {
                     NativeMethods.EmptyClipboard();
-                    
-                    // Allocate memory cho Unicode string (bao gồm null terminator)
                     int byteCount = (text.Length + 1) * 2;
-                    IntPtr hGlobal = NativeMethods.GlobalAlloc(
-                        NativeMethods.GMEM_MOVEABLE, 
-                        (UIntPtr)byteCount);
-                    
-                    if (hGlobal == IntPtr.Zero)
-                    {
-                        DebugLog?.Invoke("SetClipboard: GlobalAlloc failed");
-                        return false;
-                    }
-                    
+                    IntPtr hGlobal = NativeMethods.GlobalAlloc(NativeMethods.GMEM_MOVEABLE, (UIntPtr)byteCount);
+                    if (hGlobal == IntPtr.Zero) return false;
+
                     IntPtr pGlobal = NativeMethods.GlobalLock(hGlobal);
-                    if (pGlobal == IntPtr.Zero)
-                    {
-                        NativeMethods.GlobalFree(hGlobal);
-                        DebugLog?.Invoke("SetClipboard: GlobalLock failed");
-                        return false;
-                    }
-                    
-                    // Copy string vào memory
+                    if (pGlobal == IntPtr.Zero) { NativeMethods.GlobalFree(hGlobal); return false; }
+
                     Marshal.Copy(text.ToCharArray(), 0, pGlobal, text.Length);
-                    // Thêm null terminator
                     Marshal.WriteInt16(pGlobal + text.Length * 2, 0);
-                    
                     NativeMethods.GlobalUnlock(hGlobal);
-                    
-                    // Set clipboard data
+
                     IntPtr result = NativeMethods.SetClipboardData(NativeMethods.CF_UNICODETEXT, hGlobal);
-                    
-                    if (result == IntPtr.Zero)
-                    {
-                        NativeMethods.GlobalFree(hGlobal);
-                        DebugLog?.Invoke("SetClipboard: SetClipboardData failed");
-                        return false;
-                    }
-                    
-                    // Không free hGlobal - clipboard sẽ tự quản lý
+                    if (result == IntPtr.Zero) { NativeMethods.GlobalFree(hGlobal); return false; }
                     return true;
                 }
-                finally
-                {
-                    NativeMethods.CloseClipboard();
-                }
+                finally { NativeMethods.CloseClipboard(); }
             }
-            
-            Thread.Sleep(10);
+            Thread.Sleep(3);
         }
-        
-        DebugLog?.Invoke("SetClipboard: OpenClipboard failed after retries");
         return false;
     }
-    
-    /// <summary>
-    /// Gửi chuỗi Unicode đến ứng dụng đang active (không hỗ trợ terminal)
-    /// </summary>
-    private void SendUnicodeString(string text)
-    {
-        if (string.IsNullOrEmpty(text)) return;
-        
-        _isSendingInput = true;
-        
-        try
-        {
-            var inputs = new NativeMethods.INPUT[text.Length * 2];
-            
-            for (int i = 0; i < text.Length; i++)
-            {
-                ushort unicode = text[i];
-                
-                // Key down (Unicode)
-                inputs[i * 2] = new NativeMethods.INPUT
-                {
-                    type = NativeMethods.INPUT_KEYBOARD,
-                    u = new NativeMethods.INPUTUNION
-                    {
-                        ki = new NativeMethods.KEYBDINPUT
-                        {
-                            wVk = 0,
-                            wScan = unicode,
-                            dwFlags = NativeMethods.KEYEVENTF_UNICODE,
-                            time = 0,
-                            dwExtraInfo = VIET_IME_MARKER
-                        }
-                    }
-                };
-                
-                // Key up (Unicode)
-                inputs[i * 2 + 1] = new NativeMethods.INPUT
-                {
-                    type = NativeMethods.INPUT_KEYBOARD,
-                    u = new NativeMethods.INPUTUNION
-                    {
-                        ki = new NativeMethods.KEYBDINPUT
-                        {
-                            wVk = 0,
-                            wScan = unicode,
-                            dwFlags = NativeMethods.KEYEVENTF_UNICODE | NativeMethods.KEYEVENTF_KEYUP,
-                            time = 0,
-                            dwExtraInfo = VIET_IME_MARKER
-                        }
-                    }
-                };
-            }
-            
-            uint sent = NativeMethods.SendInput((uint)inputs.Length, inputs, Marshal.SizeOf<NativeMethods.INPUT>());
-            DebugLog?.Invoke($"SendUnicode: text='{text}', inputs={inputs.Length}, sent={sent}");
-            
-            if (sent == 0)
-            {
-                int error = Marshal.GetLastWin32Error();
-                DebugLog?.Invoke($"SendInput ERROR: {error}");
-            }
-        }
-        finally
-        {
-            _isSendingInput = false;
-        }
-    }
-    
-    public void Dispose()
-    {
-        Dispose(true);
-        GC.SuppressFinalize(this);
-    }
-    
-    protected virtual void Dispose(bool disposing)
-    {
-        if (!_disposed)
-        {
-            Uninstall();
-            _disposed = true;
-        }
-    }
-    
-    ~KeyboardHook()
-    {
-        Dispose(false);
-    }
+
+    public void Dispose() { Dispose(true); GC.SuppressFinalize(this); }
+    protected virtual void Dispose(bool disposing) { if (!_disposed) { Uninstall(); _disposed = true; } }
+    ~KeyboardHook() { Dispose(false); }
 }

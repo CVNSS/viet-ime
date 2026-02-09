@@ -306,27 +306,55 @@ public static class NativeMethods
     
     /// <summary>
     /// Chuyển virtual key code thành ký tự
+    /// Sửa lỗi: Đảm bảo trạng thái Shift/CapsLock được phản ánh chính xác
+    /// vì GetKeyboardState trong hook callback có thể không đồng bộ
     /// </summary>
-    public static char? VirtualKeyToChar(uint vkCode, uint scanCode)
+    public static char? VirtualKeyToChar(uint vkCode, uint scanCode, bool? shiftOverride = null)
     {
         var keyboardState = new byte[256];
         if (!GetKeyboardState(keyboardState))
             return null;
-        
+
+        // Dùng shiftOverride nếu có (bắt sớm từ hook callback),
+        // fallback sang GetAsyncKeyState (có thể trả về trạng thái cũ khi gõ nhanh)
+        if (shiftOverride.HasValue)
+        {
+            keyboardState[VK_SHIFT] = shiftOverride.Value ? (byte)0x80 : (byte)0;
+        }
+        else if (IsShiftPressed())
+        {
+            keyboardState[VK_SHIFT] = 0x80;
+        }
+        else
+        {
+            keyboardState[VK_SHIFT] = 0;
+        }
+
+        // Đồng bộ CapsLock toggle state
+        short capsState = GetKeyState(0x14); // VK_CAPITAL
+        if ((capsState & 0x0001) != 0)
+        {
+            keyboardState[0x14] = 0x01; // Toggle on
+        }
+        else
+        {
+            keyboardState[0x14] = 0x00;
+        }
+
         var sb = new System.Text.StringBuilder(2);
-        
+
         // Lấy keyboard layout của foreground window
         var hWnd = GetForegroundWindow();
         var threadId = GetWindowThreadProcessId(hWnd, out _);
         var layout = GetKeyboardLayout(threadId);
-        
+
         int result = ToUnicodeEx(vkCode, scanCode, keyboardState, sb, sb.Capacity, 0, layout);
-        
+
         if (result == 1)
         {
             return sb[0];
         }
-        
+
         return null;
     }
     

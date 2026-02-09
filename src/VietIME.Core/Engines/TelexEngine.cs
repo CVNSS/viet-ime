@@ -71,7 +71,7 @@ public class TelexEngine : IInputEngine
         // Xử lý 'd' -> 'đ'
         if (lowerKey == 'd')
         {
-            var dResult = TryProcessD(key);
+            var dResult = TryProcessD(key, isShiftPressed);
             if (dResult.HasValue)
             {
                 result.Handled = true;
@@ -397,18 +397,19 @@ public class TelexEngine : IInputEngine
         }
     }
     
-    private (int backspaceCount, string output)? TryProcessD(char key)
+    private (int backspaceCount, string output)? TryProcessD(char key, bool isShiftPressed)
     {
         if (_buffer.Count == 0)
             return null;
-        
+
         char lastChar = _buffer[^1];
         char lowerLast = char.ToLower(lastChar);
-        
+
         // dd -> đ
         if (lowerLast == 'd')
         {
-            bool isUpper = char.IsUpper(lastChar) || char.IsUpper(key);
+            // Triple-check uppercase: buffer char, key char, hoặc Shift state
+            bool isUpper = char.IsUpper(lastChar) || char.IsUpper(key) || isShiftPressed;
             char newChar = isUpper ? VietnameseChar.UpperD : VietnameseChar.LowerD;
             
             _buffer[^1] = newChar;
