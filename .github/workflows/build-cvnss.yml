@@ -3,8 +3,10 @@ name: Build VietIME CVNSS (Windows)
 on:
   workflow_dispatch:
   push:
-    branches:
-      - master
+    branches: [ master ]
+
+permissions:
+  contents: read
 
 jobs:
   build:
@@ -14,19 +16,70 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      # Tôn trọng global.json nếu repo có ghim SDK; nếu không thì dùng 8.0.x
       - name: Setup .NET
         uses: actions/setup-dotnet@v4
         with:
+          global-json-file: global.json
           dotnet-version: 8.0.x
 
-      - name: Restore
-        run: dotnet restore src/VietIME.App/VietIME.App.csproj
+      - name: Locate app project to publish
+        id: pick
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
 
-      - name: Publish
-        run: dotnet publish src/VietIME.App/VietIME.App.csproj -c Release -r win-x64 --self-contained true /p:PublishSingleFile=true
+          # Gom candidate .csproj
+          $candidates = @()
+          if (Test-Path "src/VietIME.App") {
+            $candidates += Get-ChildItem -Path "src/VietIME.App" -Filter *.csproj -Recurse -ErrorAction SilentlyContinue
+          }
+          $candidates += Get-ChildItem -Path "src" -Filter *.csproj -Recurse -ErrorAction SilentlyContinue
+          $candidates = $candidates | Where-Object { $_ -ne $null } | Select-Object -Unique
+
+          if (-not $candidates -or $candidates.Count -eq 0) {
+            throw "No .csproj found under src/"
+          }
+
+          # Ưu tiên project có OutputType WinExe/Exe và loại Core/Hook
+          $pick = $null
+          foreach ($f in $candidates) {
+            if ($f.FullName -match "\\VietIME\.Core\\") { continue }
+            if ($f.FullName -match "\\VietIME\.Hook\\") { continue }
+            $xml = Get-Content $f.FullName -Raw
+            if ($xml -match "<OutputType>\s*WinExe\s*</OutputType>" -or $xml -match "<OutputType>\s*Exe\s*</OutputType>") {
+              $pick = $f
+              break
+            }
+          }
+
+          # Fallback: ưu tiên VietIME.App nếu tồn tại
+          if (-not $pick) {
+            if (Test-Path "src/VietIME.App/VietIME.App.csproj") {
+              $pick = Get-Item "src/VietIME.App/VietIME.App.csproj"
+            } else {
+              $pick = $candidates | Select-Object -First 1
+            }
+          }
+
+          "project=$($pick.FullName)" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+          Write-Host "Picked project: $($pick.FullName)"
+
+      - name: Restore
+        shell: pwsh
+        run: dotnet restore "${{ steps.pick.outputs.project }}"
+
+      - name: Publish (SingleFile, win-x64)
+        shell: pwsh
+        run: |
+          $proj = "${{ steps.pick.outputs.project }}"
+          dotnet publish $proj -c Release -r win-x64 --self-contained true `
+            /p:PublishSingleFile=true `
+            /p:IncludeNativeLibrariesForSelfExtract=true `
+            -o out/publish
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
           name: VietIME-CVNSS-win-x64
-          path: src/VietIME.App/bin/Release/net8.0-windows/win-x64/publish/
+          path: out/publish/
