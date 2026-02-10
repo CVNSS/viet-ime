@@ -1,5 +1,4 @@
 <Project Sdk="Microsoft.NET.Sdk">
-
   <PropertyGroup>
     <OutputType>WinExe</OutputType>
     <TargetFramework>net8.0-windows</TargetFramework>
@@ -7,11 +6,15 @@
     <UseWindowsForms>true</UseWindowsForms>
     <ImplicitUsings>enable</ImplicitUsings>
     <Nullable>enable</Nullable>
+    <AssemblyName>VietIME</AssemblyName>
+    <Authors>Long Ngo</Authors>
+    <Company>Long Ngo</Company>
+    <Product>VietIME CVNSS4.0</Product>
+    <Copyright>© Long Ngo, 2026</Copyright>
+    <ApplicationIcon>cvnss.ico</ApplicationIcon>
   </PropertyGroup>
-
   <ItemGroup>
     <ProjectReference Include="..\VietIME.Core\VietIME.Core.csproj" />
     <ProjectReference Include="..\VietIME.Hook\VietIME.Hook.csproj" />
   </ItemGroup>
-
 </Project>
