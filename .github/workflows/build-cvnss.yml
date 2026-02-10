@@ -3,11 +3,13 @@ name: Build VietIME CVNSS (Windows)
 on:
   workflow_dispatch:
   push:
-    branches: [ "master", "main" ]
+    branches:
+      - master
 
 jobs:
   build:
     runs-on: windows-latest
+
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -15,32 +17,16 @@ jobs:
       - name: Setup .NET
         uses: actions/setup-dotnet@v4
         with:
-          dotnet-version: '8.0.x'
+          dotnet-version: 8.0.x
 
       - name: Restore
-        run: dotnet restore VietIME.sln
+        run: dotnet restore src/VietIME.App/VietIME.App.csproj
 
-      - name: Publish (win-x64, single-file)
-        shell: pwsh
-        run: |
-          $projCandidates = @(
-            "src/VietIME.App/VietIME.csproj",
-            "src/VietIME.App/VietIME.App.csproj",
-            "src/VietIME/VietIME.csproj",
-            "src/VietIME/VietIME.App.csproj"
-          )
-          $proj = $projCandidates | Where-Object { Test-Path $_ } | Select-Object -First 1
-          if (-not $proj) { throw "Cannot find app csproj. Please edit this workflow and set the correct path." }
-
-          dotnet publish $proj -c Release -r win-x64 `
-            -p:PublishSingleFile=true `
-            -p:SelfContained=true `
-            -p:IncludeNativeLibrariesForSelfExtract=true
+      - name: Publish
+        run: dotnet publish src/VietIME.App/VietIME.App.csproj -c Release -r win-x64 --self-contained true /p:PublishSingleFile=true
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
           name: VietIME-CVNSS-win-x64
-          path: |
-            src/**/bin/Release/net8.0-windows/win-x64/publish/VietIME.exe
-            src/**/bin/Release/net8.0-windows/win-x64/publish/VietIME.pdb
+          path: src/VietIME.App/bin/Release/net8.0-windows/win-x64/publish/
