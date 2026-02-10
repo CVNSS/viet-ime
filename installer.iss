@@ -9,7 +9,7 @@ Compression=lzma
 SolidCompression=yes
 
 [Files]
-Source: "publish\*"; DestDir: "{app}"; Flags: recursesubdirs
+Source: "publish\VietIME.exe"; DestDir: "{app}"
 
 [Icons]
 Name: "{group}\VietIME"; Filename: "{app}\VietIME.exe"

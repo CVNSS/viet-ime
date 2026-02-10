@@ -1,49 +1,22 @@
-name: Build and Release VietIME CVNSS4.0
-
+name: Build and Release VietIME
 on:
   push:
     branches: [ master ]
-  workflow_dispatch:
-
-permissions:
-  contents: write
-
 jobs:
   build:
     runs-on: windows-latest
-
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Setup .NET
-        uses: actions/setup-dotnet@v4
-        with:
-          dotnet-version: 8.0.x
-
-      - name: Restore
-        run: dotnet restore src/VietIME.App/VietIME.App.csproj
-
-      - name: Publish portable EXE
-        run: |
-          dotnet publish src/VietIME.App/VietIME.App.csproj `
-            -c Release `
-            -r win-x64 `
-            --self-contained true `
-            /p:PublishSingleFile=true `
-            -o portable
-
-      - name: Create portable ZIP
-        run: |
-          Compress-Archive -Path portable\* -DestinationPath VietIME-CVNSS4.0-Portable.zip
-
-      - name: Create GitHub Release
-        uses: softprops/action-gh-release@v2
-        with:
-          tag_name: CVNSS4.0-${{ github.run_number }}
-          name: VietIME CVNSS4.0 Build ${{ github.run_number }}
-          files: |
-            portable/VietIME.exe
-            VietIME-CVNSS4.0-Portable.zip
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    - uses: actions/checkout@v4
+    - uses: actions/setup-dotnet@v4
+      with:
+        dotnet-version: 8.0.x
+    - run: dotnet restore
+    - run: dotnet publish src/VietIME.App/VietIME.App.csproj -c Release -r win-x64 --self-contained true -o publish
+    - run: choco install innosetup -y
+    - run: "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" installer.iss
+    - uses: actions/upload-artifact@v4
+      with:
+        name: VietIME-build
+        path: |
+          publish\VietIME.exe
+          installer\VietIME-CVNSS4.0-Setup.exe
