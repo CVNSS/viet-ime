@@ -5,9 +5,6 @@ on:
   push:
     branches: [ master ]
 
-permissions:
-  contents: read
-
 jobs:
   build:
     runs-on: windows-latest
@@ -16,54 +13,60 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      # Tôn trọng global.json nếu repo có ghim SDK; nếu không thì dùng 8.0.x
-      - name: Setup .NET
+      # Không phụ thuộc global.json để tránh fail kiểu "file not found"
+      - name: Setup .NET 8
         uses: actions/setup-dotnet@v4
         with:
-          global-json-file: global.json
           dotnet-version: 8.0.x
 
-      - name: Locate app project to publish
+      # Cài thêm .NET 6 để cover trường hợp project target net6.0-windows
+      - name: Setup .NET 6 (compat)
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 6.0.x
+
+      - name: Pick project to publish
         id: pick
         shell: pwsh
         run: |
           $ErrorActionPreference = "Stop"
 
-          # Gom candidate .csproj
-          $candidates = @()
-          if (Test-Path "src/VietIME.App") {
-            $candidates += Get-ChildItem -Path "src/VietIME.App" -Filter *.csproj -Recurse -ErrorAction SilentlyContinue
+          # Ưu tiên path chuẩn của repo bạn
+          if (Test-Path "src/VietIME.App/VietIME.App.csproj") {
+            $proj = "src/VietIME.App/VietIME.App.csproj"
           }
-          $candidates += Get-ChildItem -Path "src" -Filter *.csproj -Recurse -ErrorAction SilentlyContinue
-          $candidates = $candidates | Where-Object { $_ -ne $null } | Select-Object -Unique
-
-          if (-not $candidates -or $candidates.Count -eq 0) {
-            throw "No .csproj found under src/"
+          elseif (Test-Path "src/VietIME/VietIME.csproj") {
+            $proj = "src/VietIME/VietIME.csproj"
           }
+          else {
+            # Fallback: tự dò project executable
+            $candidates = Get-ChildItem -Path "src" -Filter *.csproj -Recurse -ErrorAction SilentlyContinue
+            if (-not $candidates) { throw "No .csproj found under src/" }
 
-          # Ưu tiên project có OutputType WinExe/Exe và loại Core/Hook
-          $pick = $null
-          foreach ($f in $candidates) {
-            if ($f.FullName -match "\\VietIME\.Core\\") { continue }
-            if ($f.FullName -match "\\VietIME\.Hook\\") { continue }
-            $xml = Get-Content $f.FullName -Raw
-            if ($xml -match "<OutputType>\s*WinExe\s*</OutputType>" -or $xml -match "<OutputType>\s*Exe\s*</OutputType>") {
-              $pick = $f
-              break
+            $proj = $null
+            foreach ($f in $candidates) {
+              if ($f.FullName -match "\\VietIME\.Core\\") { continue }
+              if ($f.FullName -match "\\VietIME\.Hook\\") { continue }
+              $xml = Get-Content $f.FullName -Raw
+
+              # Ưu tiên WPF/WinForms (thường là app)
+              if ($xml -match "<UseWPF>\s*true\s*</UseWPF>" -or $xml -match "<UseWindowsForms>\s*true\s*</UseWindowsForms>") {
+                $proj = $f.FullName; break
+              }
+
+              # Hoặc OutputType Exe/WinExe
+              if ($xml -match "<OutputType>\s*WinExe\s*</OutputType>" -or $xml -match "<OutputType>\s*Exe\s*</OutputType>") {
+                $proj = $f.FullName; break
+              }
             }
+
+            if (-not $proj) { $proj = ($candidates | Select-Object -First 1).FullName }
           }
 
-          # Fallback: ưu tiên VietIME.App nếu tồn tại
-          if (-not $pick) {
-            if (Test-Path "src/VietIME.App/VietIME.App.csproj") {
-              $pick = Get-Item "src/VietIME.App/VietIME.App.csproj"
-            } else {
-              $pick = $candidates | Select-Object -First 1
-            }
-          }
-
-          "project=$($pick.FullName)" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
-          Write-Host "Picked project: $($pick.FullName)"
+          "project=$proj" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+          Write-Host "Publishing project: $proj"
+          Write-Host "Dotnet info:"
+          dotnet --info
 
       - name: Restore
         shell: pwsh
