@@ -4,14 +4,14 @@
     <OutputType>WinExe</OutputType>
     <TargetFramework>net8.0-windows</TargetFramework>
     <UseWPF>true</UseWPF>
+    <UseWindowsForms>true</UseWindowsForms>
     <ImplicitUsings>enable</ImplicitUsings>
     <Nullable>enable</Nullable>
-
-    <Authors>Long Ngo</Authors>
-    <Company>CVNSS</Company>
-    <Product>VietIME CVNSS4.0</Product>
-    <Copyright>© Long Ngo, 2026</Copyright>
-    <Version>4.0.0</Version>
   </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\VietIME.Core\VietIME.Core.csproj" />
+    <ProjectReference Include="..\VietIME.Hook\VietIME.Hook.csproj" />
+  </ItemGroup>
 
 </Project>
