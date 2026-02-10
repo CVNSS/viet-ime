@@ -7,6 +7,7 @@ OutputDir=installer
 OutputBaseFilename=VietIME-CVNSS4.0-Setup
 Compression=lzma
 SolidCompression=yes
+SetupIconFile=assets\cvnss.ico
 
 [Files]
 Source: "publish\VietIME.exe"; DestDir: "{app}"
