@@ -1,0 +1,29 @@
+name: Auto Release VietIME
+on:
+  push:
+    branches: [ master ]
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+    - uses: actions/checkout@v4
+    - uses: actions/setup-dotnet@v4
+      with:
+        dotnet-version: 8.0.x
+    - run: dotnet restore
+    - run: dotnet publish src/VietIME.App/VietIME.App.csproj -c Release -r win-x64 --self-contained true -o publish
+    - run: choco install innosetup -y
+    - name: Build installer
+      run: |
+        & "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" installer.iss
+    - name: Generate version
+      id: version
+      run: echo "version=build-20260210-1456" >> %GITHUB_OUTPUT%
+    - name: Create release
+      uses: softprops/action-gh-release@v2
+      with:
+        tag_name: ${{ steps.version.outputs.version }}
+        name: VietIME Auto Build ${{ steps.version.outputs.version }}
+        files: |
+          publish/VietIME.exe
+          installer/VietIME-CVNSS4.0-Setup.exe
