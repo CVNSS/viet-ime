@@ -30,7 +30,7 @@ public sealed class TelexEngine : IInputEngine
     {
         // Backspace
         if (key == '\b')
-            return ProcessBackspace();
+            return BuildBackspaceResult();
 
         // Enter / newline: reset state and let OS handle.
         if (key == '\r' || key == '\n')
@@ -93,23 +93,43 @@ public sealed class TelexEngine : IInputEngine
     // INTERNAL LOGIC
     // =========================================================
 
+    private ProcessKeyResult BuildBackspaceResult()
+    {
+        if (_buffer.Length == 0)
+            return NotHandled();
+
+        _buffer = _buffer.Substring(0, _buffer.Length - 1);
+
+        var converted = _buffer.Length == 0
+            ? string.Empty
+            : SafeConvert(_buffer);
+
+        var result = new ProcessKeyResult
+        {
+            Handled = true,
+            BackspaceCount = _lastOutput.Length,
+            OutputText = converted,
+            CurrentBuffer = _buffer
+        };
+
+        _lastOutput = converted;
+        return result;
+    }
+
     private static string SafeConvert(string cvnWord)
     {
         try
         {
-            // Convert only current word (CVN -> CQN)
             return _converter.Value.ConvertWordCvnToCqn(cvnWord);
         }
         catch
         {
-            // Fail-open: if mapping missing or parsing error, do not block typing.
             return cvnWord;
         }
     }
 
     private static bool IsWordDelimiter(char ch)
     {
-        // Anything that is whitespace/punctuation/symbol ends the word.
         return char.IsWhiteSpace(ch)
             || char.IsPunctuation(ch)
             || char.IsSymbol(ch);
